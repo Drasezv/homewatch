@@ -1,0 +1,12 @@
+[tool.pytest.ini_options]
+pythonpath = "."
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+# RUF001-003: the Russian message strings are full of "ambiguous" Cyrillic letters, that is the point
+# SIM105: try/except/pass reads better than contextlib.suppress for one call
+ignore = ["RUF001", "RUF002", "RUF003", "SIM105"]

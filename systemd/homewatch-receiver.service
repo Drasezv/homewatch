@@ -1,0 +1,43 @@
+[Unit]
+Description=homewatch: heartbeat receiver
+After=network.target
+# a watchdog keeps trying, whatever the failure
+StartLimitIntervalSec=0
+
+[Service]
+EnvironmentFile=/etc/homewatch/receiver.env
+ExecStart=/usr/bin/python3 -u /opt/homewatch/receiver.py
+SyslogIdentifier=homewatch-receiver
+Restart=always
+RestartSec=2
+# 78 = the script refused its own config, restarting will not help
+RestartPreventExitStatus=78
+
+DynamicUser=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+UMask=0077
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

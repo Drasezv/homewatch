@@ -4,6 +4,7 @@
 # socket, so there is nothing to amplify.
 import hashlib
 import hmac
+import json
 import os
 import queue
 import re
@@ -20,14 +21,20 @@ try:
     KEY = bytes.fromhex(os.environ.get("HB_KEY", ""))
     PORT = int(os.environ.get("HB_PORT", "29417"))
     DOWN_AFTER = float(os.environ.get("DOWN_AFTER", "5"))
+    SIREN_AFTER = float(os.environ.get("SIREN_AFTER", "0"))
 except ValueError:
-    print("bad value in the env file (HB_KEY, HB_PORT or DOWN_AFTER)", file=sys.stderr)
+    print("bad value in the env file (HB_KEY, HB_PORT, DOWN_AFTER or SIREN_AFTER)", file=sys.stderr)
     sys.exit(78)  # EX_CONFIG, the unit file tells systemd not to restart on it
 TOKEN = os.environ.get("BOT_TOKEN", "")
 # first id is the owner, service messages go only there
 CHATS = [c.strip() for c in os.environ.get("CHAT_ID", "").split(",") if c.strip()]
 LANG = os.environ.get("HB_LANG", "en")
 MAX_SKEW = 60  # seconds, both clocks have to agree this well
+# phone registrations of the Home Assistant companion app, see siren() below;
+# the unit hands the file over with LoadCredential=siren:...
+SIREN_FILE = os.environ.get("SIREN_PUSH") or os.path.join(
+    os.environ.get("CREDENTIALS_DIRECTORY", "/nonexistent"), "siren")
+SIREN_EVERY = 600
 # telegram is the last probe on purpose: if none of these answer, an alarm
 # could not be delivered anyway, so there is no point in raising one yet
 PROBES = (("1.1.1.1", 443), ("8.8.8.8", 443), ("api.telegram.org", 443))
@@ -45,6 +52,10 @@ TEXT = {
         "first": "Receiver started, home is on the air (uptime {u}).",
         "late": "Home server is on the air again (uptime {u}).",
         "silent": "Receiver started, but not a single packet from home in the first minute.",
+        "siren_title": "NO POWER AT HOME",
+        "siren": "The home server has been silent for {t}, most likely the power is off. "
+                 "Check the fuse box, the freezer is thawing.",
+        "siren_tts": "No power at home for {m} minutes. Check the fuse box.",
         "h": "h", "m": "min", "s": "s",
     },
     "ru": {
@@ -55,6 +66,9 @@ TEXT = {
         "first": "Приёмник запущен, дом на связи (аптайм {u}).",
         "late": "Дом снова на связи (аптайм {u}).",
         "silent": "Приёмник запущен, но от дома ни одного пакета за минуту.",
+        "siren_title": "ДОМА НЕТ СВЕТА",
+        "siren": "Сервер дома молчит уже {t}, скорее всего нет света. Проверь щиток, морозилка оттаивает.",
+        "siren_tts": "Дома нет света уже {m} минут. Проверь щиток, морозилка оттаивает.",
         "h": "ч", "m": "мин", "s": "с",
     },
 }
@@ -122,6 +136,37 @@ def notify(text, everyone=True):
             log(f"outbox full, dropped a message for chat {chat}")
 
 
+def siren(text, tts, clear=False):
+    # Home Assistant itself is dead in a power cut, but its phone registrations
+    # are not: this is the same push relay the HA app uses, and the alarm stream
+    # gets through silent mode and do-not-disturb
+    try:
+        with open(SIREN_FILE) as f:
+            phones = json.load(f)
+    except (OSError, ValueError):
+        log("siren: no phone registrations to push to")
+        return
+    if clear:
+        msgs = [("clear_notification", None, {"tag": "power_siren"})]
+    else:
+        msgs = [("TTS", None, {"ttl": 0, "priority": "high", "media_stream": "alarm_stream_max", "tts_text": tts}),
+                (text, T["siren_title"], {"ttl": 0, "priority": "high", "channel": "alarm_stream",
+                                          "importance": "max", "tag": "power_siren", "persistent": True})]
+    for p in phones:
+        reg = {k: p[k] for k in ("app_id", "app_version", "os_version", "webhook_id")}
+        for message, title, data in msgs:
+            body = {"push_token": p["push_token"], "registration_info": reg, "message": message, "data": data}
+            if title:
+                body["title"] = title
+            req = urllib.request.Request(p["push_url"], json.dumps(body).encode(), {"Content-Type": "application/json"})
+            try:
+                urllib.request.urlopen(req, timeout=15).read()
+            except Exception as e:
+                log(f"siren push failed ({type(getattr(e, 'reason', e)).__name__})")
+            else:
+                log(f"siren: {'cleared' if clear else 'sent'} ({message[:20]})")
+
+
 def uplink_ok():
     for host in PROBES:
         try:
@@ -176,8 +221,11 @@ def verify(pkt: bytes, key: bytes, last_seq: dict, now: float | None = None, sta
 class Monitor:
     """The alarm logic, kept away from sockets so the tests can drive it with a fake clock."""
 
-    def __init__(self, down_after, notify, uplink_ok, clock=time.monotonic):
+    def __init__(self, down_after, notify, uplink_ok, clock=time.monotonic, siren=None, siren_after=0):
         self.down_after = down_after
+        self.siren = siren
+        self.siren_after = siren_after
+        self.next_siren = None
         self.notify = notify
         self.uplink_ok = uplink_ok
         self.clock = clock
@@ -200,6 +248,9 @@ class Monitor:
         elif self.down_since is not None:
             said = "up_reboot" if boot != self.boot else "up_same"
             self.notify(T[said].format(t=fmt(now - self.down_since)))
+            if self.next_siren is not None:
+                self.siren(None, None, clear=True)
+                self.next_siren = None
             log(f"boot {boot.hex()[:8]}, uptime {up}s")
             self.down_since = None
         elif boot != self.boot and now - self.last_seen >= min(self.down_after, 10):
@@ -220,7 +271,14 @@ class Monitor:
                 self.warned = True
                 self.notify(T["silent"], everyone=False)
             return
-        if self.down_since is not None or now - self.last_seen <= self.down_after:
+        if self.down_since is not None:
+            gone = now - self.down_since
+            if self.siren and self.siren_after and gone >= self.siren_after and now >= (self.next_siren or 0):
+                # a short cut is only news, a long one thaws the freezer: that one has to wake someone up
+                self.next_siren = now + SIREN_EVERY
+                self.siren(T["siren"].format(t=fmt(gone)), T["siren_tts"].format(m=int(gone // 60)))
+            return
+        if now - self.last_seen <= self.down_after:
             return
         if self.uplink_down and now < self.next_probe:
             return
@@ -254,7 +312,10 @@ def main():
     threading.Thread(target=tg_worker, daemon=True).start()
     log(f"listening on udp/{PORT}, alarm after {DOWN_AFTER:g}s of silence, {len(CHATS)} chat(s)")
 
-    mon = Monitor(DOWN_AFTER, notify, uplink_ok)
+    def siren_bg(text, tts, clear=False):
+        threading.Thread(target=siren, args=(text, tts, clear), daemon=True).start()
+
+    mon = Monitor(DOWN_AFTER, notify, uplink_ok, siren=siren_bg, siren_after=SIREN_AFTER)
     last_seq = {}
     rejects = {}
     report_at = time.monotonic() + 60

@@ -232,6 +232,41 @@ def test_silent_start():
     assert sent[-1] == ("Home server is on the air again (uptime 40 s).", True)
 
 
+def test_long_outage_sounds_the_siren_and_repeats_until_power_returns():
+    calls = []
+    clock, sent = Clock(), []
+    mon = receiver.Monitor(5, lambda text, everyone=True: sent.append(text), lambda: True, clock,
+                           siren=lambda text, tts, clear=False: calls.append((clock.t, tts, clear)), siren_after=1200)
+    stream(mon, clock)
+    clock.t += 5
+    mon.tick()  # the ordinary alarm
+    clock.t += 1100
+    mon.tick()
+    assert calls == []
+    clock.t += 100
+    mon.tick()
+    mon.tick()
+    assert calls == [(clock.t, "No power at home for 20 minutes. Check the fuse box.", False)]
+    clock.t += 600
+    mon.tick()
+    assert len(calls) == 2 and calls[-1][1] == "No power at home for 30 minutes. Check the fuse box."
+    mon.packet(OTHER, 30, "h")
+    assert calls[-1] == (clock.t, None, True)
+    assert mon.next_siren is None
+
+
+def test_short_outage_never_sounds_the_siren():
+    calls = []
+    clock, sent = Clock(), []
+    mon = receiver.Monitor(5, lambda text, everyone=True: sent.append(text), lambda: True, clock,
+                           siren=lambda *a, **k: calls.append(a), siren_after=1200)
+    stream(mon, clock)
+    clock.t += 300
+    mon.tick()
+    mon.packet(OTHER, 30, "h")
+    assert calls == []
+
+
 def test_telegram_gives_up_on_4xx_without_retrying(monkeypatch):
     calls = []
 

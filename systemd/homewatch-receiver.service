@@ -6,6 +6,9 @@ StartLimitIntervalSec=0
 
 [Service]
 EnvironmentFile=/etc/homewatch/receiver.env
+# optional siren, see README: phone registrations of the Home Assistant app,
+# readable by root only, handed to the throwaway service user as a credential
+#LoadCredential=siren:/etc/homewatch/siren.json
 ExecStart=/usr/bin/python3 -u /opt/homewatch/receiver.py
 SyslogIdentifier=homewatch-receiver
 Restart=always

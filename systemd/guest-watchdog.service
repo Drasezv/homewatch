@@ -1,0 +1,12 @@
+[Unit]
+Description=guest-watchdog: start Proxmox guests that died on their own
+After=pve-guests.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/guest-watchdog.env
+ExecStart=/usr/bin/python3 /usr/local/sbin/guest_watchdog.py
+SyslogIdentifier=guest-watchdog
+TimeoutStartSec=300
+# root on purpose: it starts guests through qm and pct
+Nice=10

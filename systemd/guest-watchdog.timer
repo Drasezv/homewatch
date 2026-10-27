@@ -1,0 +1,11 @@
+[Unit]
+Description=guest-watchdog: every minute
+
+[Timer]
+# give the node's own autostart time to finish after a boot
+OnBootSec=10min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

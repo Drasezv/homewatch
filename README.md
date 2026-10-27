@@ -151,6 +151,22 @@ systemctl stop homewatch-sender      # on the home side
 
 The journal says `home is silent but so is our uplink, not alarming` and nothing reaches Telegram. Start the sender again, then remove the rules with the same loop and `-D` instead of `-I`.
 
+## Guest watchdog (Proxmox)
+
+`guest_watchdog.py` is a separate helper for the Proxmox host itself. Once a minute it looks for guests marked to start at boot that are stopped although nobody stopped them, starts them again and sends a Telegram message. I wrote it after the kernel's OOM killer took the Home Assistant VM and nobody noticed for eleven hours.
+
+A guest counts as stopped on purpose when its last stop, shutdown or destroy task is newer than its last start. A guest with a `lock` (a stop-mode backup, a snapshot, a migration) is skipped. `GW_OOM_PROTECT` moves the listed VMs to the back of the OOM killer's queue.
+
+The first version asked `pct` and `qm` about every guest every minute. Those are Perl programs that load a good part of Proxmox on each start, and with 14 guests a pass cost about 40 s of CPU: half a core, all the time. This one reads the configs from `/etc/pve` and tells a running guest by its cgroup directory, so a normal pass is a handful of file reads. The Proxmox tools only run for a guest that is actually down.
+
+```sh
+install -m 755 guest_watchdog.py /usr/local/sbin/guest_watchdog.py
+install -m 600 guest-watchdog.env.example /etc/guest-watchdog.env   # then edit it
+cp systemd/guest-watchdog.service systemd/guest-watchdog.timer /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now guest-watchdog.timer
+GW_DRY_RUN=1 python3 /usr/local/sbin/guest_watchdog.py              # prints what it would start
+```
+
 ## Tests
 
 ```sh
@@ -158,7 +174,7 @@ apt install -y python3-pytest     # or: pip install pytest, where pip is allowed
 python3 -m pytest -q
 ```
 
-They cover the packet round trip, wrong size, wrong key, every single flipped bit of a packet (552 of them), replay and reordering, stale timestamps, an unknown version byte, a new `boot_id` starting its own sequence, a clock restart on either side still getting through, the duration formatter in both languages, and the alarm logic itself with a fake clock: silence, recovery with and without a reboot, the alarm held back while the VPS's own uplink is down (the two false alarms from day two), a reboot hidden behind that outage, a stray packet from another boot, the silent-start warning, and how the Telegram sender treats a 403, a 429 and a garbage `Retry-After`.
+They cover the packet round trip, wrong size, wrong key, every single flipped bit of a packet (552 of them), replay and reordering, stale timestamps, an unknown version byte, a new `boot_id` starting its own sequence, a clock restart on either side still getting through, the duration formatter in both languages, and the alarm logic itself with a fake clock: silence, recovery with and without a reboot, the alarm held back while the VPS's own uplink is down (the two false alarms from day two), a reboot hidden behind that outage, a stray packet from another boot, the silent-start warning, and how the Telegram sender treats a 403, a 429 and a garbage `Retry-After`. For the guest watchdog: running guests cost no tool calls, a dead container or VM is started, one stopped on purpose or locked by a backup is left alone, snapshot sections are ignored, and the dry run only prints.
 
 ## Limitations
 
